@@ -36,7 +36,7 @@ model = ConcreteModel()
 # Sets
 model.i = Set(initialize=countries)
 model.i_nuclear_allowed = Set(initialize=nuclear_allowed)
-model.i_daccs_included = Set(initialize=nuclear_allowed)
+model.i_daccs_included = Set(initialize=daccs_included)
 model.t = Set(initialize=years)
 
 # Parameters
@@ -150,7 +150,7 @@ def nuclear_readiness_constraint(model, i):
     return Constraint.Skip
 
 def countries_allowed_constraint(model, i, t):
-    if i not in model.i_nuclear_allowed:
+    if i not in model.i_nuclear_allowed.data():
         return model.new[i,t] == 0
     return Constraint.Skip
 
