@@ -7,15 +7,20 @@ import time
 start = time.time()
 
 # General data and asumption
-ppm_to_mass = 2.13      # Conversion from ppm to mass CO2, 1 ppm of CO2 = 2.13 giga ton of CO2
+ppm_to_mass = 2.13 * 1e9      # Conversion from ppm to mass CO2, 1 ppm of CO2 = 2.13 giga ton of CO2
 plant_capacity_factor = 0.9
-scenario = 'IPCC middle'
 percent_allowable_investment = 0.05
 plant_lifetime = 30
 uranium_consumption = 1 # in kg uranium/capacity/year 
 uranium_reserve = 8e9 # uranium reserve in the world
 water_consumption = 1 # in m3/capacity/year
 land_consumption = 1 # in m2/capacity
+discount_rate = 0.1 # 10% of discount rate
+
+scenario = 'IPCC middle'
+ppm_limit_scenario = '1.5 C'
+ppm_limit ={'1.5 C': (465.0, 411.0),
+           '2 C': (505.0, 480.0)}
 
 # Getting data from excel
 wb = xl.load_workbook('data.xlsx') 
@@ -42,7 +47,7 @@ model.t = Set(initialize=years)
 # Parameters
 cost_table = df['cost_table'].iloc[:,1:].values
 co2_tax = df['co2_tax'].iloc[:,1:].values
-co2_storage_capacity = df['co2_storage_capacity'].iloc[:,1].values
+co2_storage_capacity = df['co2_storage_capacity'].iloc[:,1].values * 1e9
 gdp = df['gdp'].iloc[:,1:].values
 plant_capex = df['capex'].iloc[:,1].values
 ccs_readiness_index = df['ccs_readiness'].iloc[:,1].values
@@ -74,7 +79,7 @@ model.water_reserve = Param(model.i, initialize=water_reserve_data , within=Real
 model.land_reserve = Param(model.i, initialize=land_reserve_data , within=Reals)
 
 # Decision Variables
-model.new = Var(model.i, model.t, within=NonNegativeReals, bounds=(0.0, 100.0))
+model.new = Var(model.i, model.t, within=NonNegativeReals, bounds=(0.0, 1.0 * 1e9))
 model.co2_ppm = Var(model.t, within=NonNegativeReals)       # not really a decision variables just a way to determine the co2 ppm based on the previous value of co2 ppm
 
 # Expressions
@@ -91,7 +96,7 @@ def retirement(model, i, t):
         else:
             return 0
 
-def _IPCC_prediction(t, scenario='IPCC middle'):        # return the CO2 concentration in ppm based on IPCC prediction 
+def IPCC_prediction(t, scenario='IPCC middle'):        # return the CO2 concentration in ppm based on IPCC prediction 
     if scenario == 'IPCC middle':
         return -0.00804 * t**2 + 34.83214 * t - 37159.42857
     elif scenario == 'IPCC conservative':
@@ -106,25 +111,26 @@ model.captured_co2 = Expression(model.i, model.t, rule=captured_co2)
 
 # Objective Function
 def tot_cost(model):
-    return sum((model.cost_table[i, t] - model.co2_tax[i, t]) * model.capacity[i, t] for i in model.i for t in model.t)
+    return sum(((model.cost_table[i, t] - model.co2_tax[i, t]) / (1+discount_rate)**(t-min(model.t))) * model.capacity[i, t] for i in model.i for t in model.t)
 
 model.obj = Objective(rule=tot_cost , sense=minimize)
 
 # Mandatory Constraints
 def CO2_captured(model, t):
     if t == max(model.t):
-        return model.co2_ppm[t] <= 411        # the co2 ppm in 2100 must lower than 411 ppm (Paris agreement 1.5 C scenario) 
+        return model.co2_ppm[t] <= ppm_limit[ppm_limit_scenario ][1]        # the co2 ppm in 2100 must lower than 411 ppm (Paris agreement 1.5 C scenario) 
     else:
-        return model.co2_ppm[t] <= 465        # the co2 ppm in all years must lower than 465 ppm (Paris agreement 1.5 C scenario) 
+        return model.co2_ppm[t] <= ppm_limit[ppm_limit_scenario ][0]        # the co2 ppm in all years must lower than 465 ppm (Paris agreement 1.5 C scenario) 
 
 def CO2_storage(model, i):
     return sum(model.captured_co2[i,t] for t in model.t) <= model.CO2_storage[i]
 
 def co2_ppm_rule(model, t):
     if t == min(model.t):  # Initial CO2 concentration at the first period
-        return model.co2_ppm[t] == _IPCC_prediction(t, scenario)
+        captured = sum(model.captured_co2[i, t] for i in model.i)
+        return model.co2_ppm[t] == IPCC_prediction(t, scenario) - captured / ppm_to_mass
     else:
-        generated_co2 = (_IPCC_prediction(t, scenario) - _IPCC_prediction(t-interval, scenario)) * ppm_to_mass
+        generated_co2 = (IPCC_prediction(t, scenario) - IPCC_prediction(t-interval, scenario)) * ppm_to_mass
         captured = sum(model.captured_co2[i, t] for i in model.i)
         return model.co2_ppm[t] == model.co2_ppm[t-interval] + (generated_co2 - captured) / ppm_to_mass
     
@@ -174,47 +180,81 @@ def daccs_included_constraint(model, i):
     return Constraint.Skip
 
 # Economic aspect
-model.financing_constraint = Constraint(model.i, model.t, rule=financing_constrant)
+# model.financing_constraint = Constraint(model.i, model.t, rule=financing_constrant)
 # model.profitable_constraint = Constraint(model.i, model.t, rule=profit_constraint)
 
 # Technological readiness
-model.ccs_readiness_constraint = Constraint(model.i, rule=ccs_readiness_constraint)
-model.nuclear_readiness_constraint = Constraint(model.i, rule=nuclear_readiness_constraint)
+# model.ccs_readiness_constraint = Constraint(model.i, rule=ccs_readiness_constraint)
+# model.nuclear_readiness_constraint = Constraint(model.i, rule=nuclear_readiness_constraint)
 
 # Socio-political aspect
-model.nuclear_allowed = Constraint(model.i, model.t, rule=countries_allowed_constraint)
-model.nuclear_perception_constraint = Constraint(model.i, rule=public_support_constraint)
+# model.nuclear_allowed = Constraint(model.i, model.t, rule=countries_allowed_constraint)
+# model.nuclear_perception_constraint = Constraint(model.i, rule=public_support_constraint)
 
 # Technical aspect
-model.uranium_reserve_constraint = Constraint(rule=uranium_reserve_constraint)
-model.water_reserve_constraint = Constraint(model.i, rule=water_reserve_constraint)
-model.land_reserve_constraint = Constraint(model.i, rule=land_reserve_constraint)
+# model.uranium_reserve_constraint = Constraint(rule=uranium_reserve_constraint)
+# model.water_reserve_constraint = Constraint(model.i, rule=water_reserve_constraint)
+# model.land_reserve_constraint = Constraint(model.i, rule=land_reserve_constraint)
 
 # Political wilingness aspect
-model.daccs_included_constraint = Constraint(model.i, rule=daccs_included_constraint)
+# model.daccs_included_constraint = Constraint(model.i, rule=daccs_included_constraint)
 
 # Solver
 solver = SolverFactory('glpk', executable='C:\\w64\\glpsol.exe')
 result = solver.solve(model)
 
-print(f'The optimization status is {result.solver.status}')
+print(f'The solver status is {result.solver.status}')
 print(f'The termination condition is {result.solver.termination_condition}')
 
-# Getting result
-capacity_array = np.zeros((num_countries, num_periods))
-new_cap_array = np.zeros((num_countries, num_periods))
-co2_ppm_array = np.zeros(num_periods)
+if result.solver.termination_condition == 'optimal':
+    print(f'the total present cost is: {model.obj()/1e9:.2f} Billion USD')
 
-for x, i in enumerate(model.i):
-    for y, t in enumerate(model.t):
-        new_cap_array[x,y] = model.new[i, t].value
-        capacity_array[x, y] = model.capacity[i, t]()
+    # Getting result
+    result_dict = {
+    "New Capacity": np.zeros((num_countries, num_periods)),
+    "Capacity": np.zeros((num_countries, num_periods)),
+    "Investment Required": np.zeros((num_countries, num_periods)),
+    "CO2 Storage Level": np.zeros(num_countries),
+    "CO2 ppm": np.zeros(num_periods)
+    }
+    
+    unit_dict = {
+        "New Capacity": 'million CO2 per year',
+        "Capacity": 'million CO2 per year',
+        "Investment Required": 'million USD',
+        "CO2 Storage Level": '%',
+        "CO2 ppm": 'ppm'
+    }
 
-        if x == 0:
-            co2_ppm_array[y] = model.co2_ppm[t]()
+    for x, i in enumerate(model.i):
+        for y, t in enumerate(model.t):
+            result_dict['New Capacity'][x,y] = model.new[i, t].value / 1e6         # New capacity in million CO2/year
+            result_dict['Capacity'][x, y] = model.capacity[i, t]() / 1e6      # Capacity in million CO2/year
+            result_dict['Investment Required'][x,y] = (model.new[i, t].value * capex_data[t]) / 1e6   # Investment required in million USD
 
-new_cap_array = np.concatenate((countries.reshape(-1,1), new_cap_array), axis=1)
-capacity_array = np.concatenate((countries.reshape(-1,1), capacity_array), axis=1)
+            if y == 0:
+                result_dict['CO2 Storage Level'][x] = sum(model.captured_co2[i,t]() for t in model.t) / max(1e-10, model.CO2_storage[i])       # co2 storage level (100% means full 0% empty)
+
+            if x == 0:
+                result_dict['CO2 ppm'][y] = model.co2_ppm[t]()               # co2 concentration in atmosphere in ppm
+
+    for key in ["New Capacity", "Capacity", "Investment Required"]:      # # data that belong to i and t set
+        result_dict[key] = np.column_stack((countries, result_dict[key]))  
+        result_dict[key] = pd.DataFrame(result_dict[key], columns=['Country'] + list(years))
+
+    for key in ["CO2 Storage Level"]:     # data that only belong to i set
+        result_dict[key] = np.column_stack((countries, result_dict[key]))  
+        result_dict[key] = pd.DataFrame(result_dict[key], columns=['Countries', key])
+
+    for key in ["CO2 ppm"]:     # data that only belong to t set
+        result_dict[key] = np.column_stack((years, result_dict[key]))  
+        result_dict[key] = pd.DataFrame(result_dict[key], columns=['Year', key])
+
+    with pd.ExcelWriter("result.xlsx") as writer:
+        for sheet_name, df in result_dict.items():
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    print("Excel file created successfully!")
 
 end = time.time()
 
