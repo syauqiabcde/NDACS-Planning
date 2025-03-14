@@ -3,6 +3,23 @@ from pyomo.environ import *
 import pandas as pd
 import openpyxl as xl 
 import time
+import geopandas as gpd
+import matplotlib.pyplot as plt
+
+def map_visualization(world, df, key):
+    world = world.merge(df, left_on="name", right_on="Country", how="left")
+
+    fig, ax = plt.subplots(figsize=(15, 8))
+    world.boundary.plot(ax=ax, linewidth=1)  # Plot country boundaries
+
+    # Plot CO2 Storage as a choropleth (color-coded)
+    world.plot(column=key, cmap="coolwarm", legend=True,
+           legend_kwds={'label': key, 'shrink': 0.6},
+           ax=ax)
+
+    # Title & Show
+    plt.title(key, fontsize=14)
+
 
 start = time.time()
 
@@ -244,7 +261,7 @@ if result.solver.termination_condition == 'optimal':
 
     for key in ["CO2 Storage Level"]:     # data that only belong to i set
         result_dict[key] = np.column_stack((countries, result_dict[key]))  
-        result_dict[key] = pd.DataFrame(result_dict[key], columns=['Countries', key])
+        result_dict[key] = pd.DataFrame(result_dict[key], columns=['Country', key])
 
     for key in ["CO2 ppm"]:     # data that only belong to t set
         result_dict[key] = np.column_stack((years, result_dict[key]))  
@@ -256,6 +273,27 @@ if result.solver.termination_condition == 'optimal':
 
     print("Excel file created successfully!")
 
+    # VIsualization
+    world = gpd.read_file(gpd.datasets.get_path('naturalearth_lowres'))
+    
+    # for i, (key, df) in enumerate(result_dict.items()):
+    #     map_visualization(world, df, key)
+
+    df = result_dict["CO2 Storage Level"]
+    world = world.merge(df, left_on="name", right_on="Country", how="left")
+
+    fig, ax = plt.subplots(figsize=(15, 8))
+    world.boundary.plot(ax=ax, linewidth=1)  # Plot country boundaries
+
+    # Plot CO2 Storage as a choropleth (color-coded)
+    world.plot(column=key, cmap="coolwarm", legend=True,
+           legend_kwds={'label': key, 'shrink': 0.6},
+           ax=ax)
+
+    # Title & Show
+    plt.title(key, fontsize=14)
+
+    
 end = time.time()
 
 print(f'total runtime: {end-start:.2f} s')
