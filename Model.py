@@ -1,27 +1,17 @@
+#%%
 import numpy as np
 from pyomo.environ import *
 import pandas as pd
 import openpyxl as xl 
 import time
-import geopandas as gpd
+# import geopandas as gpd
 import matplotlib.pyplot as plt
-
-def map_visualization(world, df, key):
-    world = world.merge(df, left_on="name", right_on="Country", how="left")
-
-    fig, ax = plt.subplots(figsize=(15, 8))
-    world.boundary.plot(ax=ax, linewidth=1)  # Plot country boundaries
-
-    # Plot CO2 Storage as a choropleth (color-coded)
-    world.plot(column=key, cmap="coolwarm", legend=True,
-           legend_kwds={'label': key, 'shrink': 0.6},
-           ax=ax)
-
-    # Title & Show
-    plt.title(key, fontsize=14)
-
+from scipy.interpolate import RegularGridInterpolator
 
 start = time.time()
+
+# Case name
+case_name = 'Socio-political'
 
 # General data and asumption
 ppm_to_mass = 2.13 * 1e9      # Conversion from ppm to mass CO2, 1 ppm of CO2 = 2.13 giga ton of CO2
@@ -43,10 +33,11 @@ ppm_limit ={'1.5 C': (465.0, 411.0),
 wb = xl.load_workbook('data.xlsx') 
 sheet_name = wb.sheetnames
 df = {sheet: pd.read_excel('data.xlsx', sheet_name=sheet) for sheet in sheet_name}
-years = df[sheet_name[0]].columns[1:]
-countries = df[sheet_name[0]].iloc[:,0].values
+years = df['capex'].iloc[:,0].values
+countries = df['env_condition'].iloc[:,0].values
 nuclear_allowed = df['nuclear_allowed'].iloc[:,:].values.reshape(-1)
-daccs_included = df['daccs_included'].iloc[:,:].values.reshape(-1)
+ccs_included = df['ccs_included'].iloc[:,:].values.reshape(-1)
+non_NPT = df['non-NPT'].iloc[:,:].values.reshape(-1)
 interval = years[1] - years[0]
 
 num_periods = len(years)
@@ -58,40 +49,69 @@ model = ConcreteModel()
 # Sets
 model.i = Set(initialize=countries)
 model.i_nuclear_allowed = Set(initialize=nuclear_allowed)
-model.i_daccs_included = Set(initialize=daccs_included)
+model.i_ccs_included = Set(initialize=ccs_included)
+model.i_non_NPT = Set(initialize=non_NPT)
 model.t = Set(initialize=years)
 
 # Parameters
-cost_table = df['cost_table'].iloc[:,1:].values
+duty = df['energy_duty'].iloc[:,1:].values
+temperature = np.linspace(0, 40, 17)
+rh = np.linspace(0, 100, 21)
+ambient_temp = df['env_condition'].iloc[:,1].values
+ambient_rh = df['env_condition'].iloc[:,2].values
 co2_tax = df['co2_tax'].iloc[:,1:].values
 co2_storage_capacity = df['co2_storage_capacity'].iloc[:,1].values * 1e9
 gdp = df['gdp'].iloc[:,1:].values
 plant_capex = df['capex'].iloc[:,1].values
 ccs_readiness_index = df['ccs_readiness'].iloc[:,1].values
 nuclear_readiness_index = df['nuclear_readiness'].iloc[:,1].values
-nuclear_perception = df['nuclear_perception'].iloc[:,1].values
+nuclear_support = df['nuclear_perception'].iloc[:,1].values
+nuclear_oppose = df['nuclear_perception'].iloc[:,2].values
 water_reserve = df['resource_reserve'].iloc[:,1].values
 land_reserve = df['resource_reserve'].iloc[:,2].values
 
-cost_data = {(countries[i], years[t]): cost_table[i, t] for i in range(num_countries) for t in range(num_periods)}
+interpolator = RegularGridInterpolator((rh,temperature), duty)
+duty_data = {
+    countries[i]: float(interpolator((ambient_rh[i], ambient_temp[i])))
+    for i in range(num_countries)
+}
+
+crf = (discount_rate*(1+discount_rate)**2)/((1+discount_rate)**2-1)
+elc_cost = 0.0154 # $/MJ
+heat_cost = 0.0067 # $/MJ
+heat_share = 0.87   # percentage of heat energy requirement compared to total energy requirement / elc_share = 1-heat_share
+cost_table = np.zeros((num_countries, num_periods))
+for i in range(num_countries):
+    for t in range(num_periods):
+        cost_table[i, t] = (crf * plant_capex[t] * 1.085) + (plant_capex[t] * (0.097)) + ( duty_data[countries[i]] * (heat_share * heat_cost + (1-heat_share) * elc_cost) * 1000)
+
+rh_data = {countries[i]: ambient_rh[i] for i in range(num_countries)}
+temp_data = {countries[i]: ambient_temp[i] for i in range(num_countries)}
 co2_tax_data = {(countries[i], years[t]): co2_tax[i, t] for i in range(num_countries) for t in range(num_periods)}
 CO2_storage_data = {countries[i]: co2_storage_capacity[i] for i in range(num_countries)}
 gdp_data = {(countries[i], years[t]): gdp[i, t] for i in range(num_countries) for t in range(num_periods)}
 capex_data = {years[t]: plant_capex[t] for t in range(num_periods)}
 ccs_readiness_data = {countries[i]: ccs_readiness_index[i] for i in range(num_countries)}
 nuclear_readiness_data = {countries[i]: nuclear_readiness_index[i] for i in range(num_countries)}
-nuclear_perception_data = {countries[i]: nuclear_perception[i] for i in range(num_countries)}
+nuclear_support_data = {countries[i]: nuclear_support[i] for i in range(num_countries)}
+nuclear_oppose_data = {countries[i]: nuclear_oppose[i] for i in range(num_countries)}
 water_reserve_data = {countries[i]: water_reserve[i] for i in range(num_countries)}
 land_reserve_data = {countries[i]: land_reserve[i] for i in range(num_countries)}
+cost_table_data = {(countries[i], years[t]): cost_table[i, t]
+             for i in range(num_countries) for t in range(num_periods)}
 
-model.cost_table = Param(model.i, model.t, initialize=cost_data, within=Reals)
+model.cost_table = Param(model.i, model.t, initialize=cost_table_data, within=Reals)
+model.energy_duty = Param(model.i, initialize=duty_data, within=Reals)
+model.rh = Param(model.i, initialize=rh_data , within=Reals)
+model.temperature = Param(model.i, initialize=temp_data , within=Reals)
 model.co2_tax = Param(model.i, model.t, initialize=co2_tax_data, within=Reals)
 model.CO2_storage = Param(model.i, initialize=CO2_storage_data , within=Reals)
 model.gdp = Param(model.i, model.t, initialize=gdp_data , within=Reals)
 model.capex = Param(model.t, initialize=capex_data , within=Reals)
 model.ccs_readiness = Param(model.i, initialize=ccs_readiness_data , within=Reals)
 model.nuclear_readiness = Param(model.i, initialize=nuclear_readiness_data , within=Integers)
-model.nuclear_perception = Param(model.i, initialize=nuclear_perception_data , within=Reals)
+model.nuclear_support = Param(model.i, initialize=nuclear_support_data , within=Reals)
+model.nuclear_oppose = Param(model.i, initialize=nuclear_oppose_data , within=Reals)    
 model.water_reserve = Param(model.i, initialize=water_reserve_data , within=Reals)
 model.land_reserve = Param(model.i, initialize=land_reserve_data , within=Reals)
 
@@ -135,7 +155,7 @@ model.obj = Objective(rule=tot_cost , sense=minimize)
 # Mandatory Constraints
 def CO2_captured(model, t):
     if t == max(model.t):
-        return model.co2_ppm[t] <= ppm_limit[ppm_limit_scenario ][1]        # the co2 ppm in 2100 must lower than 411 ppm (Paris agreement 1.5 C scenario) 
+        return model.co2_ppm[t] <= ppm_limit[ppm_limit_scenario][1]        # the co2 ppm in 2100 must lower than 411 ppm (Paris agreement 1.5 C scenario) 
     else:
         return model.co2_ppm[t] <= ppm_limit[ppm_limit_scenario ][0]        # the co2 ppm in all years must lower than 465 ppm (Paris agreement 1.5 C scenario) 
 
@@ -157,7 +177,7 @@ model.co2_ppm_constraint = Constraint(model.t, rule=co2_ppm_rule)
 
 # Optional Constraints (please comment in which constraint you dont want to apply)
 def financing_constrant(model, i, t):
-    return model.new[i, t] * model.capex[t] <= percent_allowable_investment * model.gdp[i, t]
+    return model.new[i, t] * model.capex[t] <= percent_allowable_investment * model.gdp[i, t] * 1000
 
 def profit_constraint(model, i, t):
     return model.captured_co2[i,t] * model.co2_tax[i,t] >= model.capacity[i,t] * model.cost_table[i,t]
@@ -177,8 +197,13 @@ def countries_allowed_constraint(model, i, t):
         return model.new[i,t] == 0
     return Constraint.Skip
 
-def public_support_constraint(model, i):
-    if model.nuclear_perception[i] < 50:
+def countries_NPT(model, i, t):
+    if i in model.i_non_NPT.data():
+        return model.new[i,t] == 0
+    return Constraint.Skip
+
+def public_perception_constraint(model, i, t):
+    if model.nuclear_support[i] < model.nuclear_oppose[i]:
         return model.new[i,t] == 0
     return Constraint.Skip
 
@@ -191,14 +216,13 @@ def water_reserve_constraint(model, i):
 def land_reserve_constraint(model, i):
     return sum(model.capacity[i,t] for t in model.t) * land_consumption <= model.land_reserve[i]
 
-def daccs_included_constraint(model, i):
-    if i not in model.i_daccs_included:
+def ccs_included_constraint(model, i, t):
+    if i not in model.i_ccs_included:
         return model.new[i,t] == 0
     return Constraint.Skip
 
 # Economic aspect
 # model.financing_constraint = Constraint(model.i, model.t, rule=financing_constrant)
-# model.profitable_constraint = Constraint(model.i, model.t, rule=profit_constraint)
 
 # Technological readiness
 # model.ccs_readiness_constraint = Constraint(model.i, rule=ccs_readiness_constraint)
@@ -206,7 +230,8 @@ def daccs_included_constraint(model, i):
 
 # Socio-political aspect
 # model.nuclear_allowed = Constraint(model.i, model.t, rule=countries_allowed_constraint)
-# model.nuclear_perception_constraint = Constraint(model.i, rule=public_support_constraint)
+# model.NPT_constratint = Constraint(model.i, model.t, rule=countries_NPT)
+# model.nuclear_perception_constraint = Constraint(model.i, model.t, rule=public_perception_constraint)
 
 # Technical aspect
 # model.uranium_reserve_constraint = Constraint(rule=uranium_reserve_constraint)
@@ -214,7 +239,7 @@ def daccs_included_constraint(model, i):
 # model.land_reserve_constraint = Constraint(model.i, rule=land_reserve_constraint)
 
 # Political wilingness aspect
-# model.daccs_included_constraint = Constraint(model.i, rule=daccs_included_constraint)
+# model.ccs_included_constraint = Constraint(model.i, model.t, rule=ccs_included_constraint)
 
 # Solver
 solver = SolverFactory('glpk', executable='C:\\w64\\glpsol.exe')
@@ -267,33 +292,12 @@ if result.solver.termination_condition == 'optimal':
         result_dict[key] = np.column_stack((years, result_dict[key]))  
         result_dict[key] = pd.DataFrame(result_dict[key], columns=['Year', key])
 
-    with pd.ExcelWriter("result.xlsx") as writer:
+    with pd.ExcelWriter(f"result {case_name}.xlsx") as writer:
         for sheet_name, df in result_dict.items():
             df.to_excel(writer, sheet_name=sheet_name, index=False)
 
     print("Excel file created successfully!")
-
-    # VIsualization
-    world = gpd.read_file(gpd.datasets.get_path('naturalearth_lowres'))
-    
-    # for i, (key, df) in enumerate(result_dict.items()):
-    #     map_visualization(world, df, key)
-
-    df = result_dict["CO2 Storage Level"]
-    world = world.merge(df, left_on="name", right_on="Country", how="left")
-
-    fig, ax = plt.subplots(figsize=(15, 8))
-    world.boundary.plot(ax=ax, linewidth=1)  # Plot country boundaries
-
-    # Plot CO2 Storage as a choropleth (color-coded)
-    world.plot(column=key, cmap="coolwarm", legend=True,
-           legend_kwds={'label': key, 'shrink': 0.6},
-           ax=ax)
-
-    # Title & Show
-    plt.title(key, fontsize=14)
-
-    
+  
 end = time.time()
 
 print(f'total runtime: {end-start:.2f} s')
