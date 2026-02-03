@@ -174,7 +174,7 @@ def run_model(co2_scenario='IPCC middle', ppm_limit_scenario='1.5 C', optim_scen
     # Decision Variables
     model.new = Var(model.i, model.t, within=NonNegativeReals, bounds=(0.0, 0.3))   # new DACCS plant capacity in Gton CO2/year
     model.co2_ppm = Var(model.t, within=NonNegativeReals)       # not really a decision variables just a way to determine the co2 ppm based on the previous value of co2 ppm
-    model.u = Var(model.i, model.t, model.h, within=NonNegativeReals)               # utilization of DACCS plant in Gton CO2/year, result of cf * capacity (used for avoiding bilinear term in objective function)
+    model.u = Var(model.i, model.t, within=NonNegativeReals)               # utilization of DACCS plant in Gton CO2/year, result of cf * capacity (used for avoiding bilinear term in objective function)
     model.new_nuclear = Var(model.i, model.t, within=NonNegativeReals, bounds=(0.0, 150.0)) # new nuclear power plant capacity in GW
     model.nuclear_req = Var(model.i, model.t, within=NonNegativeReals)                  # nuclear power plant capacity required in GW
     model.nuclear_shortfall = Var(model.i, model.t, within=NonNegativeReals)            # nuclear power plant capacity shortfall in GW
@@ -232,7 +232,7 @@ def run_model(co2_scenario='IPCC middle', ppm_limit_scenario='1.5 C', optim_scen
         
     def system_om_cost(model, i, t):
         daccs_fix_om = model.capex[t] * 1e9 * model.capacity[i,t] * fixed_om           # Fixed OM cost of Nuclear DACCS plant
-        nuclear_fix_om = model.nuclear_capex[t] * 1e6 * model.new_nuclear[i,t] * nuclear_fixed_om                     # Nuclear power plant investment cost
+        nuclear_fix_om = model.nuclear_capex[t] * 1e6 * model.nuclear_capacity[i,t] * nuclear_fixed_om                     # Nuclear power plant investment cost
         uranium_cost = sum(model.uranium_pp_consumption[i,t,h]  * model.uranium_price[t] for h in model.h)
         return (daccs_fix_om + nuclear_fix_om + uranium_cost) * interval[t]
 
@@ -261,22 +261,22 @@ def run_model(co2_scenario='IPCC middle', ppm_limit_scenario='1.5 C', optim_scen
     model.nuclear_capacity = Expression(model.i, model.t, rule=nuclear_capacity_rule)
     model.electricity_production = Expression(model.i, model.t, model.h, rule=electricity_production)
     model.electricity_consumption = Expression(model.i, model.t, model.h, rule=electricity_consumption)
+    model.uranium_pp_consumption = Expression(model.i, model.t, model.h, rule=uranium_pp_consumption)
     model.excess_electricity = Expression(model.i, model.t, model.h, rule=excess_electricity)
     model.om_cost = Expression(model.i, model.t, rule=system_om_cost)
     model.land_consumption = Expression(model.i, model.t, rule=system_land_consumption)
     model.water_consumption = Expression(model.i, model.t, rule=system_water_consumption)
-    model.uranium_pp_consumption = Expression(model.i, model.t, model.h, rule=uranium_pp_consumption)
-
+    
     # Objective Function
     def tot_cost(model):
         return sum(((model.capex[t] * 1e9 * model.new[i,t]                                      # DACCS investment cost
                     + model.nuclear_capex[t] * 1e6 * model.new_nuclear[i,t]                     # Nuclear power plant investment cost
                     + model.om_cost[i,t])                                                     # Total operation and maintenance cost of the system
-                    - model.co2_tax[i, t] * 1e9 * (model.captured_co2[i,t,h] + model.reduced_co2[i,t,h])                     # CO2 tax benefit
-                    - model.export_elc[i,t,h] * elc_cost * 1e3)                      # benefit from selling excess electricity
+                    - model.co2_tax[i, t] * 1e9 * sum(model.captured_co2[i,t,h] + model.reduced_co2[i,t,h] for h in model.h)                     # CO2 tax benefit
+                    - sum(model.export_elc[i,t,h] * elc_cost * 1e3 for h in model.h))                      # benefit from selling excess electricity
                     / (1+discount_rate)**(t-min(model.t))                                       # Discount rate  
-                    for i in model.i for t in model.t for h in model.h) / 1e12       
-        
+                    for i in model.i for t in model.t) / 1e12
+            
     model.obj = Objective(rule=tot_cost, sense=minimize)
 
     # Mandatory Constraints
@@ -287,7 +287,7 @@ def run_model(co2_scenario='IPCC middle', ppm_limit_scenario='1.5 C', optim_scen
             return model.co2_ppm[t] <= ppm_limit[ppm_limit_scenario ][0]        # the co2 ppm in all years must lower than 465 ppm (Paris agreement 1.5 C scenario) 
 
     def co2_ppm_trend(model, t):
-        if t <= co2_peak_year:
+        if t < co2_peak_year:
             return Constraint.Skip
         else:
             return model.co2_ppm[t] <= model.co2_ppm[t-interval[t]]
@@ -299,32 +299,32 @@ def run_model(co2_scenario='IPCC middle', ppm_limit_scenario='1.5 C', optim_scen
         if t == min(model.t):  # Initial CO2 concentration at the first period
             captured = sum(model.captured_co2[i, t, h] for i in model.i for h in model.h) 
             reduced = sum(model.reduced_co2[i, t, h] for i in model.i for h in model.h) # in giga ton CO2
-            emitted = sum(model.nuclear_capacity[i,t] * power_plant_cf * 8760 * 3600 * nuclear_emission_factor * interval[t] / 1e9 for i in model.i)  # in giga ton CO2)
+            emitted = sum(model.electricity_production[i,t,h] * nuclear_emission_factor * interval[t] / 1e9 for i in model.i for h in model.h)  # in giga ton CO2)
             return model.co2_ppm[t] == (IPCC_prediction(t, scenario) * ppm_to_mass + emitted - captured - reduced) / ppm_to_mass
         else:
-            generated_co2 = (IPCC_prediction(t, scenario) - IPCC_prediction(t-interval[t]+1, scenario)) * ppm_to_mass
+            generated = (IPCC_prediction(t, scenario) - IPCC_prediction(t-interval[t]+1, scenario)) * ppm_to_mass
             captured = sum(model.captured_co2[i, t, h] for i in model.i for h in model.h) 
             reduced = sum(model.reduced_co2[i, t, h] for i in model.i for h in model.h) # in giga ton CO2
-            emitted = sum(model.nuclear_capacity[i,t] * power_plant_cf * 8760 * 3600 * nuclear_emission_factor * interval[t] / 1e9 for i in model.i)  # in giga ton CO2)
-            return model.co2_ppm[t] == model.co2_ppm[t-interval[t]] + (generated_co2 + emitted - captured - reduced) / ppm_to_mass
+            emitted = sum(model.electricity_production[i,t,h] * nuclear_emission_factor * interval[t] / 1e9 for i in model.i for h in model.h)  # in giga ton CO2)
+            return model.co2_ppm[t] == model.co2_ppm[t-interval[t]] + (generated + emitted - captured - reduced) / ppm_to_mass
 
     def rampup_constraint(model, i, t, h):
         if h % H == 0:
             return Constraint.Skip
         else:
-            return (model.u[i, t, h] - model.u[i, t, h-1]) <= 0.1 * model.capacity[i, t]
+            return (model.captured_co2[i, t, h] - model.captured_co2[i, t, h-1]) / interval[t] <= 0.1 * model.capacity[i, t]
         
     def rampdown_constraint(model, i, t, h):
         if h % H == 0:
             return Constraint.Skip
         else:
-            return (model.u[i, t, h-1] - model.u[i, t, h]) <= 0.1 * model.capacity[i, t]
+            return (model.captured_co2[i, t, h-1] - model.captured_co2[i, t, h]) / interval[t] <= 0.1 * model.capacity[i, t]
 
     def upper_u(model, i, t, h):
-        return model.u[i, t, h] <= model.capacity[i, t] * cf_maximum
+        return model.captured_co2[i, t, h] / interval[t] <= model.capacity[i, t] * cf_maximum
 
     def lower_u(model, i, t, h):
-        return model.u[i, t, h] >= model.capacity[i, t] * cf_minimum
+        return model.captured_co2[i, t, h] / interval[t] >= model.capacity[i, t] * cf_minimum
 
     def nuclear_capacity_elc(model, i, t):
         return model.nuclear_req[i,t] >= model.nuclear_elc[i,t]
@@ -510,14 +510,14 @@ def run_model(co2_scenario='IPCC middle', ppm_limit_scenario='1.5 C', optim_scen
                 
                 for z, h in enumerate(model.h):
                     try:
-                        result_dict[f'cf NDACS {t}'][x,z] = model.u[i,t,h].value / model.capacity[i, t]()    # capacity factor of Nuclear DACCS
-                    except:
+                        result_dict[f'cf NDACS {t}'][x,z] = model.captured_co2[i,t,h].value / interval[t] / model.capacity[i, t]()    # capacity factor of Nuclear DACCS
+                    except(ZeroDivisionError):
                         result_dict[f'cf NDACS {t}'][x,z] = 0
 
         for key in ["New Capacity", "Capacity", "New Nuclear Capacity", 
                     "Nuclear Capacity", "Investment Required", "Export electricity", 
                     "Number of DACCS plant", "Number of Nuclear plant", "Excess electricity", 
-                    "Land consumption", "Water consumption"]:      # # data that belong to i and t set
+                    "Land consumption", "Water consumption", "Investment Required as percent GDP"]:      # # data that belong to i and t set
             result_dict[key] = np.column_stack((countries, result_dict[key]))  
             result_dict[key] = pd.DataFrame(result_dict[key], columns=['Country'] + list(years))
 
